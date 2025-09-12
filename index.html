@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Liquid Snake — Fixed</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #070709;
+    --panel: #0f1113;
+    --accent: #00ffd5;
+  }
+  html,body{height:100%;margin:0;background:var(--bg);font-family:'Orbitron',sans-serif}
+  .wrap{height:100%;display:flex;align-items:center;justify-content:center}
+  #game-container{position:relative;width:92vw;height:92vh;max-width:1400px;max-height:900px}
+  canvas{width:100%;height:100%;display:block;border-radius:12px;background:linear-gradient(180deg,#0b0c0d,#0a0a0b)}
+  #start-btn{
+    position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+    z-index:30;padding:12px 20px;border-radius:10px;border:0;cursor:pointer;
+    background:linear-gradient(90deg,#00ffd5,#00aaff);color:#001;font-weight:700;font-size:18px;
+    box-shadow:0 8px 24px rgba(0,170,255,0.12);
+  }
+  #hud{position:absolute;left:12px;top:12px;color:#9aa;font-size:14px;z-index:30}
+  #score{font-weight:700;color:var(--accent);font-size:18px}
+  @media (max-width:700px){#start-btn{font-size:16px;padding:10px 14px}}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="game-container">
+      <canvas id="game"></canvas>
+      <div id="hud"><span id="score">Score: 0</span></div>
+      <button id="start-btn">Start Game</button>
+    </div>
+  </div>
+
+<script>
+/* Liquid Snake — robust single-file implementation
+   - Starts with 4 segments, score 0
+   - Blue food: +1 score, +1 length
+   - Red food: -3 score, -3 length -> if score<1 OR length<1 => Game Over
+   - Path-based snake movement (snaky)
+*/
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d', { alpha: false });
+const startBtn = document.getElementById('start-btn');
+const scoreEl = document.getElementById('score');
+
+let animId = null;
+let gameRunning = false;
+
+// Logical (CSS) canvas size helpers (we draw in CSS pixels)
+function resizeCanvas(){
+  // set internal pixel buffer for crispness
+  const cssW = canvas.clientWidth || Math.floor(window.innerWidth * 0.92);
+  const cssH = canvas.clientHeight || Math.floor(window.innerHeight * 0.92);
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = Math.floor(cssW * dpr);
+  canvas.height = Math.floor(cssH * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+// initial resize
+resizeCanvas();
+window.addEventListener('resize', () => { resizeCanvas(); });
+
+// Game parameters
+const INITIAL_SEGMENTS = 4;
+const SEGMENT_SPACING = 16;         // pixels between segments (visual spacing)
+const HEAD_SPEED = 2.8;             // px per frame
+const MIN_POINT_SPACING = 0.8;      // min path step for head
+const SKIP_COLLIDE = 5;             // skip nearest N segments when checking self-collision
+const FOOD_RADIUS = 9;
+const SEGMENT_RADIUS = SEGMENT_SPACING * 0.6;
+
+let head = { x: 0, y: 0 };          // continuous head position (screen coords)
+let direction = { x: 1, y: 0 };     // current heading vector (unit-ish)
+let segmentCount = INITIAL_SEGMENTS;
+let path = [];                      // path points: path[0] = head position
+let food = null;                    // blue food {x,y}
+let redFood = null;                 // red food {x,y} or null
+let score = 0;
+let blueEaten = 0;
+
+// Helpers
+function mod(n, m){ return ((n % m) + m) % m; }
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+function distXY(ax,ay,bx,by){ return Math.hypot(ax-bx, ay-by); }
+// shortest delta considering wrap across CSS canvas size
+function shortestDelta(a, b, size){ let d = b - a; if(d > size/2) d -= size; if(d < -size/2) d += size; return d; }
+function wrappedDistance(ax,ay,bx,by){
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  const dx = shortestDelta(ax, bx, cw);
+  const dy = shortestDelta(ay, by, ch);
+  return Math.hypot(dx, dy);
+}
+
+// Path utilities
+function getPointAtDistance(d){
+  if(path.length === 0) return { x: head.x, y: head.y };
+  if(d <= 0) return { x: path[0].x, y: path[0].y };
+  let acc = 0;
+  for(let i=0;i<path.length-1;i++){
+    const a = path[i], b = path[i+1];
+    const seg = dist(a,b);
+    if(acc + seg >= d){
+      const remain = d - acc;
+      const t = seg === 0 ? 0 : (remain / seg);
+      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+    }
+    acc += seg;
+  }
+  // fallback: return last point
+  const last = path[path.length-1];
+  return { x: last.x, y: last.y };
+}
+function computePathLength(){
+  let L = 0;
+  for(let i=0;i<path.length-1;i++) L += dist(path[i], path[i+1]);
+  return L;
+}
+
+// Spawning food (blue), ensures not too close to head
+function spawnFoodAvoidHead(){
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  const headScrX = mod(path[0].x, cw);
+  const headScrY = mod(path[0].y, ch);
+  let attempts = 0;
+  while(attempts < 200){
+    const fx = Math.random() * cw;
+    const fy = Math.random() * ch;
+    if(wrappedDistance(headScrX, headScrY, fx, fy) > Math.max(SEGMENT_SPACING * 3, 48)){
+      return { x: fx, y: fy };
+    }
+    attempts++;
+  }
+  // fallback
+  return { x: Math.random() * cw, y: Math.random() * ch };
+}
+
+// Reset / start
+function resetGame(){
+  if(animId) cancelAnimationFrame(animId);
+  gameRunning = true;
+  score = 0;
+  blueEaten = 0;
+  segmentCount = INITIAL_SEGMENTS;
+
+  // place head in center
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  head.x = cw / 2;
+  head.y = ch / 2;
+  direction = { x: 1, y: 0 };
+
+  // build initial short path behind the head
+  path = [];
+  path.unshift({ x: head.x, y: head.y });
+  // create some trailing points behind head so the snake renders with initial length
+  for(let i=1;i< Math.ceil((segmentCount * SEGMENT_SPACING) / Math.max(MIN_POINT_SPACING,1)) + 4; i++){
+    path.push({ x: head.x - i * (direction.x * MIN_POINT_SPACING || 1), y: head.y - i * (direction.y * MIN_POINT_SPACING || 1) });
+  }
+
+  food = spawnFoodAvoidHead();
+  redFood = null;
+  updateScoreDisplay();
+  startBtn.style.display = 'none';
+
+  // start loop
+  animId = requestAnimationFrame(loop);
+}
+
+// Game over
+function gameOver(){
+  gameRunning = false;
+  if(animId) cancelAnimationFrame(animId);
+  animId = null;
+  startBtn.textContent = 'Game Over — Restart';
+  startBtn.style.display = 'block';
+}
+
+// Score display
+function updateScoreDisplay(){
+  scoreEl.textContent = `Score: ${score}`;
+}
+
+// Input: arrow keys / WASD (no immediate reverse)
+document.addEventListener('keydown', e => {
+  if(!gameRunning) return;
+  switch(e.key){
+    case 'ArrowUp': case 'w': case 'W':
+      if(direction.y !== 1) direction = { x: 0, y: -1 };
+      break;
+    case 'ArrowDown': case 's': case 'S':
+      if(direction.y !== -1) direction = { x: 0, y: 1 };
+      break;
+    case 'ArrowLeft': case 'a': case 'A':
+      if(direction.x !== 1) direction = { x: -1, y: 0 };
+      break;
+    case 'ArrowRight': case 'd': case 'D':
+      if(direction.x !== -1) direction = { x: 1, y: 0 };
+      break;
+    case 'Escape':
+      // quick pause / stop
+      gameOver();
+      break;
+  }
+});
+
+// Start button
+startBtn.addEventListener('click', () => {
+  resetGame();
+});
+
+// Update: move head, maintain path, compute segment positions, handle food logic
+function update(){
+  // move head (unwrapped coords)
+  head.x += direction.x * HEAD_SPEED;
+  head.y += direction.y * HEAD_SPEED;
+
+  // keep path head updated
+  const first = path[0];
+  if(!first || dist({x:first.x,y:first.y}, {x:head.x,y:head.y}) > MIN_POINT_SPACING){
+    path.unshift({ x: head.x, y: head.y });
+  } else {
+    // update latest head point if not adding new
+    path[0].x = head.x;
+    path[0].y = head.y;
+  }
+
+  // trim path length so it doesn't grow without bounds (keep a bit more than needed)
+  const needed = (segmentCount + 12) * SEGMENT_SPACING;
+  let total = 0;
+  for(let i=0;i<path.length-1;i++){
+    total += dist(path[i], path[i+1]);
+    if(total > needed){ path.length = i+2; break; }
+  }
+
+  // compute segment positions along path
+  const segments = [];
+  for(let i=0;i<segmentCount;i++){
+    const d = i * SEGMENT_SPACING;
+    const p = getPointAtDistance(d);
+    segments.push(p);
+  }
+
+  // check eating blue food
+  if(food){
+    const hx = mod(path[0].x, canvas.clientWidth);
+    const hy = mod(path[0].y, canvas.clientHeight);
+    const d = wrappedDistance(hx, hy, food.x, food.y);
+    if(d < FOOD_RADIUS + SEGMENT_RADIUS * 0.6){
+      // ate blue
+      score += 1;
+      segmentCount += 1;
+      blueEaten += 1;
+      updateScoreDisplay();
+      food = spawnFoodAvoidHead();
+
+      // spawn red after each 3 blue eaten
+      if(blueEaten % 3 === 0){
+        redFood = spawnFoodAvoidHead();
+      }
+    }
+  }
+
+  // check eating red food
+  if(redFood){
+    const hx = mod(path[0].x, canvas.clientWidth);
+    const hy = mod(path[0].y, canvas.clientHeight);
+    const d = wrappedDistance(hx, hy, redFood.x, redFood.y);
+    if(d < FOOD_RADIUS + SEGMENT_RADIUS * 0.6){
+      // ate red: subtract 3 from score & length
+      redFood = null;
+      score -= 3;
+      // remove up to 3 segments
+      const remove = Math.min(3, segmentCount);
+      segmentCount -= remove;
+      // After applying red effect: check losing condition as you requested
+      if(score < 1 || segmentCount < 1){
+        // ensure display updates briefly before game over
+        updateScoreDisplay();
+        gameOver();
+        return null; // stop further processing
+      }
+      // otherwise update score and continue
+      updateScoreDisplay();
+    }
+  }
+
+  // check self-collision: head vs segments after skip index
+  const hx = mod(path[0].x, canvas.clientWidth);
+  const hy = mod(path[0].y, canvas.clientHeight);
+  for(let i = Math.max(SKIP_COLLIDE, 4); i < segments.length; i++){
+    const seg = segments[i];
+    const sx = mod(seg.x, canvas.clientWidth);
+    const sy = mod(seg.y, canvas.clientHeight);
+    const dd = wrappedDistance(hx, hy, sx, sy);
+    if(dd < SEGMENT_RADIUS * 0.9){
+      gameOver();
+      return null;
+    }
+  }
+
+  return segments;
+}
+
+// Draw routine
+function draw(segments){
+  // clear
+  ctx.fillStyle = '#0b0b0c';
+  ctx.fillRect(0,0,canvas.clientWidth, canvas.clientHeight);
+
+  // draw food (blue)
+  if(food){
+    ctx.save();
+    ctx.beginPath();
+    ctx.shadowBlur = 18;
+    ctx.shadowColor = 'rgba(0,255,220,0.45)';
+    ctx.fillStyle = 'rgba(0,255,200,0.95)';
+    ctx.arc(food.x, food.y, FOOD_RADIUS, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // draw red food
+  if(redFood){
+    ctx.save();
+    ctx.beginPath();
+    ctx.shadowBlur = 14;
+    ctx.shadowColor = 'rgba(255,70,70,0.35)';
+    ctx.fillStyle = '#ff4444';
+    ctx.arc(redFood.x, redFood.y, FOOD_RADIUS, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  if(!segments || segments.length === 0) return;
+
+  // glow snake (tail first)
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for(let i = segments.length - 1; i >= 0; i--){
+    const seg = segments[i];
+    const scrX = mod(seg.x, canvas.clientWidth);
+    const scrY = mod(seg.y, canvas.clientHeight);
+    const t = 1 - (i / segments.length);
+    const radius = SEGMENT_RADIUS * (0.8 + 0.6 * t);
+    ctx.beginPath();
+    ctx.shadowBlur = 20 * (0.4 + 0.6 * t);
+    ctx.shadowColor = `rgba(0,255,220,${0.12 + 0.35 * t})`;
+    ctx.fillStyle = `rgba(0,220,200,${0.13 + 0.6 * t})`;
+    ctx.arc(scrX, scrY, radius, 0, Math.PI*2);
+    ctx.fill();
+
+    if(i === 0){
+      // bright core for head
+      ctx.beginPath();
+      ctx.shadowBlur = 30;
+      ctx.shadowColor = 'rgba(255,255,255,0.9)';
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.arc(scrX, scrY, Math.max(4, radius*0.5), 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+
+  // subtle connecting line
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.lineWidth = 1.0;
+  ctx.strokeStyle = 'rgba(0,200,190,0.06)';
+  ctx.beginPath();
+  for(let i=0;i<segments.length-1;i++){
+    const a = segments[i], b = segments[i+1];
+    const ax = mod(a.x, canvas.clientWidth), ay = mod(a.y, canvas.clientHeight);
+    if(i === 0) ctx.moveTo(ax, ay); else ctx.lineTo(ax, ay);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+// animation loop
+function loop(){
+  if(!gameRunning) return;
+  const segments = update();
+  if(segments === null){
+    // update() indicated immediate end (game over), stop
+    return;
+  }
+  draw(segments);
+  animId = requestAnimationFrame(loop);
+}
+
+// convenience: allow clicking canvas to start if not running
+canvas.addEventListener('click', () => {
+  if(!gameRunning) resetGame();
+});
+
+// initial UI state
+startBtn.style.display = 'block';
+updateScoreDisplay();
+
+</script>
+</body>
+</html>
