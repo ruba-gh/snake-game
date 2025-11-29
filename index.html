@@ -1,5 +1,5 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html lang="en">    
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -185,21 +185,36 @@ function updateScoreDisplay(){
   scoreEl.textContent = `Score: ${score}`;
 }
 
+/* ===========================
+   Direction helper (keys + swipe)
+   =========================== */
+function setDirection(nx, ny){
+  if(!gameRunning) return;
+
+  // ignore zero direction
+  if(nx === 0 && ny === 0) return;
+
+  // prevent instant reverse
+  if(nx === -direction.x && ny === -direction.y) return;
+
+  direction = { x: nx, y: ny };
+}
+
 // Input: arrow keys / WASD (no immediate reverse)
 document.addEventListener('keydown', e => {
   if(!gameRunning) return;
   switch(e.key){
     case 'ArrowUp': case 'w': case 'W':
-      if(direction.y !== 1) direction = { x: 0, y: -1 };
+      setDirection(0, -1);
       break;
     case 'ArrowDown': case 's': case 'S':
-      if(direction.y !== -1) direction = { x: 0, y: 1 };
+      setDirection(0, 1);
       break;
     case 'ArrowLeft': case 'a': case 'A':
-      if(direction.x !== 1) direction = { x: -1, y: 0 };
+      setDirection(-1, 0);
       break;
     case 'ArrowRight': case 'd': case 'D':
-      if(direction.x !== -1) direction = { x: 1, y: 0 };
+      setDirection(1, 0);
       break;
     case 'Escape':
       // quick pause / stop
@@ -207,6 +222,54 @@ document.addEventListener('keydown', e => {
       break;
   }
 });
+
+/* ===========================
+   Touch controls (swipe on mobile)
+   =========================== */
+let touchStartX = null;
+let touchStartY = null;
+
+canvas.addEventListener('touchstart', e => {
+  // let the tap still trigger the click handler to start the game
+  if(e.touches.length > 0){
+    const t = e.touches[0];
+    touchStartX = t.clientX;
+    touchStartY = t.clientY;
+  }
+}, { passive: true });
+
+canvas.addEventListener('touchend', e => {
+  if(touchStartX === null || touchStartY === null) return;
+  const t = e.changedTouches[0];
+  const dx = t.clientX - touchStartX;
+  const dy = t.clientY - touchStartY;
+  const absDx = Math.abs(dx);
+  const absDy = Math.abs(dy);
+
+  const SWIPE_THRESHOLD = 20; // px
+
+  // reset start
+  touchStartX = null;
+  touchStartY = null;
+
+  if(absDx < SWIPE_THRESHOLD && absDy < SWIPE_THRESHOLD) return;
+
+  if(absDx > absDy){
+    // horizontal swipe
+    if(dx > 0){
+      setDirection(1, 0);  // right
+    }else{
+      setDirection(-1, 0); // left
+    }
+  }else{
+    // vertical swipe
+    if(dy > 0){
+      setDirection(0, 1);  // down
+    }else{
+      setDirection(0, -1); // up
+    }
+  }
+}, { passive: true });
 
 // Start button
 startBtn.addEventListener('click', () => {
@@ -403,5 +466,6 @@ startBtn.style.display = 'block';
 updateScoreDisplay();
 
 </script>
+
 </body>
 </html>
